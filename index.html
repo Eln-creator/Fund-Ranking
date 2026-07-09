@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>基金业绩排名自动计算工具</title>
+    <title>基金业绩排名计算</title>
     <style>
 :root {
   color-scheme: light;
@@ -130,12 +130,13 @@ h2 {
   display: grid;
   grid-template-columns: minmax(260px, 1.35fr) repeat(3, minmax(170px, 1fr));
   gap: 14px;
-  align-items: stretch;
+  align-items: start;
 }
 
 label {
   display: grid;
   gap: 8px;
+  align-content: start;
   min-width: 0;
 }
 
@@ -436,8 +437,8 @@ tbody tr:hover {
       <section class="workspace">
         <header class="topbar">
           <div>
-            <p class="eyebrow">Fund Ranking Workbench</p>
-            <h1>基金业绩排名自动计算工具</h1>
+            <p class="eyebrow">基金业绩排名计算</p>
+            <h1>基金业绩排名计算</h1>
           </div>
           <div class="status-pill" id="fileStatus">未加载数据</div>
         </header>
