@@ -645,6 +645,7 @@ state.columnOrder = resultColumns.map((column) => column.key);
 const pivotBaseColumns = [
   { key: "code", label: "产品代码", width: 12, render: (row) => escapeHtml(row.code), exportValue: (row) => row.code },
   { key: "name", label: "产品简称", width: 28, render: (row) => escapeHtml(row.name), exportValue: (row) => row.name },
+  { key: "givenRank", label: "已给排名", width: 16, render: (row) => formatRankDisplay(row.givenRank).replace(/\n/g, "<br>"), exportValue: (row) => formatRankDisplay(row.givenRank) },
   { key: "categoryValue", label: "对比分类", width: 22, render: (row) => escapeHtml(row.categoryValue || "--"), exportValue: (row) => row.categoryValue },
   { key: "fiveYearRating", label: "5年评级", width: 12, render: (row) => escapeHtml(row.fiveYearRating || "--"), exportValue: (row) => row.fiveYearRating },
   { key: "threeYearRating", label: "3年评级", width: 12, render: (row) => escapeHtml(row.threeYearRating || "--"), exportValue: (row) => row.threeYearRating },
@@ -652,7 +653,7 @@ const pivotBaseColumns = [
   { key: "note", label: "备注", width: 44, render: (row) => escapeHtml(row.note || "正常"), exportValue: (row) => row.note, className: (row) => (isWarnNote(row.note) ? "note-warn" : "") },
 ];
 
-state.columnOrder = ["code", "name", "categoryValue", "fiveYearRating", "threeYearRating", "query", "note"];
+state.columnOrder = ["code", "name", "givenRank", "categoryValue", "fiveYearRating", "threeYearRating", "query", "note"];
 
 const periodWords = [
   "最近十年",
@@ -946,12 +947,22 @@ function buildColumns(rows, headerInfo) {
     const header = parts.join(" ");
     const role = detectRole(header);
     const metric = detectMetric(header);
-    const rankMetric = detectRankMetric(header);
+    let rankMetric = detectRankMetric(header);
     const period = extractPeriod(header);
+    if (rankMetric === "auto") rankMetric = inferRankMetric(columns, period) || "nav";
     columns.push({ index: c, header, role, metric, rankMetric, period });
   }
 
   return columns;
+}
+
+function inferRankMetric(columns, period) {
+  for (let i = columns.length - 1; i >= 0; i -= 1) {
+    const previous = columns[i];
+    if (!previous.metric) continue;
+    if (!period || !previous.period || previous.period.key === period.key) return previous.metric;
+  }
+  return "";
 }
 
 function rememberCategoryColumns(target, categoryCols, sheetName) {
@@ -1051,7 +1062,7 @@ function detectMetric(header) {
   const text = normalizeHeader(header);
   if (!text || text.includes("排名")) return "";
   if (text.includes("超额收益率") || text.includes("超额增长率")) return "excess";
-  if (text.includes("同类型") || text.includes("无风险") || text.includes("最大回撤") || text.includes("标准差")) return "";
+  if (text.includes("同类型") || text.includes("无风险") || text.includes("最大回撤") || text.includes("标准差") || text.includes("复权")) return "";
   if (text.includes("净值增长率")) return "nav";
   if (/收益率(\[%\]|\(％?\)|（％?）|%)?$/.test(text) || text.includes("收益率[%]")) return "nav";
   return "";
@@ -1061,7 +1072,8 @@ function detectRankMetric(header) {
   const text = normalizeHeader(header);
   if (!text || !text.includes("排名")) return "";
   if (text.includes("超额")) return "excess";
-  if (text.includes("收益") || text.includes("增长率") || extractPeriod(header)) return "nav";
+  if (text.includes("净值") || text.includes("增长率")) return "nav";
+  if (text.includes("收益") || extractPeriod(header)) return "auto";
   return "";
 }
 
@@ -1207,7 +1219,7 @@ function parseNumber(value) {
 function parseRankValue(value) {
   const text = cleanText(value);
   if (!text || text === "--") return null;
-  const match = text.match(/(\d+)\s*\/\s*(\d+)/);
+  const match = text.replace(/(?<=\d),(?=\d{3}\b)/g, "").match(/(\d+)\s*\/\s*(\d+)/);
   if (!match) return null;
   const rank = Number.parseInt(match[1], 10);
   const total = Number.parseInt(match[2], 10);
@@ -1216,11 +1228,18 @@ function parseRankValue(value) {
 }
 
 function refreshPeriodOptions() {
-  const metric = el.metricType.value;
+  let metric = el.metricType.value;
   const previousSelected = new Set(getSelectedPeriodKeys());
-  const available = state.periods.filter((period) =>
-    state.funds.some((fund) => fund.metrics[period.key]?.[metric] !== undefined || fund.ranks[period.key]?.[metric])
-  );
+  let available = getAvailablePeriods(metric);
+  if (!available.length && state.funds.length) {
+    const fallbackMetric = metric === "nav" ? "excess" : "nav";
+    const fallbackAvailable = getAvailablePeriods(fallbackMetric);
+    if (fallbackAvailable.length) {
+      metric = fallbackMetric;
+      el.metricType.value = fallbackMetric;
+      available = fallbackAvailable;
+    }
+  }
 
   el.periodSelect.innerHTML = "";
   if (!available.length) {
@@ -1243,6 +1262,12 @@ function refreshPeriodOptions() {
     el.periodSelect.options[0].selected = true;
   }
   el.periodSelect.disabled = false;
+}
+
+function getAvailablePeriods(metric) {
+  return state.periods.filter((period) =>
+    state.funds.some((fund) => fund.metrics[period.key]?.[metric] !== undefined || fund.ranks[period.key]?.[metric])
+  );
 }
 
 function getSelectedPeriodKeys() {
@@ -1328,6 +1353,40 @@ function rankFund({ query, target, period, categoryType, metricType, keywords, n
   if (notePrefix) notes.push(notePrefix.replace(/；$/, ""));
 
   const categoryValue = getCategoryValue(target, categoryType);
+  const storedRank = !keywords.length ? getPreferredStoredRank(target, period.key, metricType) : null;
+  const activeMetricType = storedRank?.metricType || metricType;
+  const targetMetric = target.metrics[period.key]?.[activeMetricType];
+  const givenRank = getGivenRecentThreeYearRank(target, metricType);
+
+  if (storedRank) {
+    notes.push(storedRank.metricType === metricType ? "使用 Excel 已有排名列" : `使用 Excel 已有${metricLabels[storedRank.metricType] || ""}排名列`);
+    if (!Number.isFinite(targetMetric)) notes.push("目标基金无所选指标值，仅使用已有排名");
+    if (!categoryValue) notes.push("目标基金缺少所选分类，仅使用已有排名");
+    if (storedRank.total < 10) notes.push("有效样本数不足 10 只");
+
+    return {
+      query,
+      code: target.code,
+      name: target.name,
+      categoryType: categoryLabels[categoryType],
+      categoryValue,
+      metricType: metricLabels[activeMetricType] || metricLabels[metricType],
+      period: period.display,
+      keywordText: "无",
+      value: Number.isFinite(targetMetric) ? targetMetric : "",
+      givenRank,
+      fiveYearRating: target.ratings?.fiveYear || "",
+      threeYearRating: target.ratings?.threeYear || "",
+      sampleSize: storedRank.total,
+      rank: storedRank.rank,
+      percentile: `前 ${Math.ceil((storedRank.rank / storedRank.total) * 100)}%`,
+      categoryPoolSize: "",
+      poolAfterKeyword: "",
+      excluded: "",
+      note: notes.join("；"),
+    };
+  }
+
   if (!categoryValue) {
     return buildMissingResult(query, period, categoryType, metricType, keywords, "目标基金缺少所选分类", target);
   }
@@ -1340,35 +1399,6 @@ function rankFund({ query, target, period, categoryType, metricType, keywords, n
   }
 
   const poolAfterKeyword = pool.length;
-  const targetMetric = target.metrics[period.key]?.[metricType];
-  const storedRank = !keywords.length ? getStoredRank(target, period.key, metricType) : null;
-
-  if (storedRank) {
-    notes.push("使用 Excel 已有排名列");
-    if (!Number.isFinite(targetMetric)) notes.push("目标基金无所选指标值，仅使用已有排名");
-    if (storedRank.total < 10) notes.push("有效样本数不足 10 只");
-
-    return {
-      query,
-      code: target.code,
-      name: target.name,
-      categoryType: categoryLabels[categoryType],
-      categoryValue,
-      metricType: metricLabels[metricType],
-      period: period.display,
-      keywordText: "无",
-      value: Number.isFinite(targetMetric) ? targetMetric : "",
-      fiveYearRating: target.ratings?.fiveYear || "",
-      threeYearRating: target.ratings?.threeYear || "",
-      sampleSize: storedRank.total,
-      rank: storedRank.rank,
-      percentile: `前 ${Math.ceil((storedRank.rank / storedRank.total) * 100)}%`,
-      categoryPoolSize,
-      poolAfterKeyword,
-      excluded: "",
-      note: notes.join("；"),
-    };
-  }
 
   const rankedPool = pool
     .map((fund) => ({
@@ -1402,6 +1432,7 @@ function rankFund({ query, target, period, categoryType, metricType, keywords, n
     period: period.display,
     keywordText: keywords.join(" / ") || "无",
     value: Number.isFinite(targetMetric) ? targetMetric : "",
+    givenRank,
     fiveYearRating: target.ratings?.fiveYear || "",
     threeYearRating: target.ratings?.threeYear || "",
     sampleSize: rankedPool.length,
@@ -1415,10 +1446,65 @@ function rankFund({ query, target, period, categoryType, metricType, keywords, n
 }
 
 function getStoredRank(fund, periodKey, metricType) {
+  return getExactStoredRank(fund, periodKey, metricType);
+}
+
+function getExactStoredRank(fund, periodKey, metricType) {
   const rank = fund?.ranks?.[periodKey]?.[metricType];
   if (!rank) return null;
   if (!Number.isFinite(rank.rank) || !Number.isFinite(rank.total)) return null;
   return rank;
+}
+
+function getPreferredStoredRank(fund, periodKey, metricType) {
+  if (isGivenRecentThreeYearKey(periodKey)) return null;
+  const exact = getStoredRank(fund, periodKey, metricType);
+  if (exact) return { ...exact, metricType };
+  return null;
+}
+
+function getGivenRecentThreeYearRank(fund, metricType) {
+  const ranks = fund?.ranks || {};
+  const keys = Object.keys(ranks).filter(isGivenRecentThreeYearKey);
+  if (!keys.length) return null;
+
+  const metricOrder = Array.from(new Set([metricType, metricType === "excess" ? "nav" : "excess"]));
+  for (const rankMetric of metricOrder) {
+    for (const key of keys) {
+      const rank = getExactStoredRank(fund, key, rankMetric);
+      if (rank) return { ...rank, sampleSize: rank.total, metricType: rankMetric };
+    }
+  }
+  return null;
+}
+
+function isGivenRecentThreeYearKey(periodKey) {
+  const label = String(periodKey || "").split("|")[0];
+  return label.includes("最近三年");
+}
+
+function getEquivalentPeriodKeys(periodKey) {
+  const key = String(periodKey || "");
+  if (!key) return [];
+  const separator = key.indexOf("|");
+  const label = separator >= 0 ? key.slice(0, separator) : key;
+  const range = separator >= 0 ? key.slice(separator + 1) : "";
+  const labels = getEquivalentPeriodLabels(label);
+  return Array.from(new Set(labels.map((item) => `${item}|${range}`)));
+}
+
+function getEquivalentPeriodLabels(label) {
+  const text = String(label || "").trim();
+  const labels = [text];
+  const years = getPeriodYearCount(text);
+  if (Number.isFinite(years)) {
+    const numberText = years === 1 ? "一" : years === 2 ? "两" : years === 3 ? "三" : years === 5 ? "五" : String(years);
+    labels.push(`近${numberText}年`, `最近${numberText}年`, `过去${numberText}年`);
+    if (years === 2) labels.push("近二年", "最近二年", "过去二年");
+  }
+  if (text.includes("今年以来")) labels.push("今年以来");
+  if (text.includes("成立以来")) labels.push("成立以来");
+  return Array.from(new Set(labels.filter(Boolean)));
 }
 
 function getCategoryValue(fund, categoryType) {
@@ -1467,6 +1553,7 @@ function buildMissingResult(query, period, categoryType, metricType, keywords, r
     period: period.display,
     keywordText: keywords.join(" / ") || "无",
     value: "",
+    givenRank: getGivenRecentThreeYearRank(target, metricType),
     fiveYearRating: target.ratings?.fiveYear || "",
     threeYearRating: target.ratings?.threeYear || "",
     sampleSize: "",
@@ -1497,6 +1584,7 @@ function getActiveResultColumns() {
     "code",
     "name",
     ...state.periodColumns.map((column) => column.key),
+    "givenRank",
     "categoryValue",
     "fiveYearRating",
     "threeYearRating",
@@ -1603,11 +1691,13 @@ function buildPivotRows(results) {
         keywordText: row.keywordText,
         fiveYearRating: row.fiveYearRating,
         threeYearRating: row.threeYearRating,
+        givenRank: row.givenRank || null,
         periodRanks: {},
         noteParts: [],
       });
     }
     const group = groups.get(groupKey);
+    if (!group.givenRank && row.givenRank) group.givenRank = row.givenRank;
     group.periodRanks[row.period] = {
       rank: row.rank,
       sampleSize: row.sampleSize,
